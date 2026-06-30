@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Work Order Type Swimlanes</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="page-header">
+        <div>
+          <h1>Work Orders</h1>
+        </div>
+        <div class="page-actions">
+          <button class="nv5-button" type="button">Download</button>
+          <button class="nv5-button" type="button">New work order</button>
+        </div>
+      </header>
+
+      <main class="layout-grid">
+        <section class="toolbar" aria-label="Board controls">
+          <div class="toolbar-left">
+            <input class="search-input" id="searchInput" type="search" placeholder="Search work orders" autofocus />
+            <div class="status-dock" id="statusDock" aria-label="Minimized status columns"></div>
+          </div>
+          <div class="toolbar-right">
+            <button class="filter-trigger" id="filterToggle" type="button" aria-expanded="false">Filters</button>
+          </div>
+        </section>
+
+        <section class="swimlane-layout" id="swimlaneLayout">
+          <section class="board-area">
+            <div class="board-frame">
+              <button class="type-pane-chevron type-pane-chevron-floating" id="typePaneToggle" type="button" aria-expanded="false" aria-label="Show type filters" hidden>&rsaquo;</button>
+              <div class="board-scroll">
+                <section class="matrix-board" id="matrixBoard" aria-label="Type swimlane Kanban board"></section>
+              </div>
+              <div class="board-x-scroll" id="boardXScroll" aria-hidden="true">
+                <div class="board-x-scroll-inner" id="boardXScrollInner"></div>
+              </div>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <div class="filter-backdrop" id="filterBackdrop" hidden></div>
+    <aside class="filter-overlay" id="generalFilterPanel" aria-label="General work order filters" aria-hidden="true"></aside>
+
+    <script src="mock-workorders.js"></script>
+    <script>
+      const mock = window.WorkOrderKanbanMock;
+      const state = mock.createFilterState("all");
+      const collapsedStatuses = Object.fromEntries(mock.statuses.map((status) => [status.value, false]));
+      const collapsedSwimlanes = Object.fromEntries(mock.typeOrder.map((type) => [type, false]));
+      let typeColumnCollapsed = false;
+      let filtersOpen = false;
+      let currentFiltered = [];
+
+      const searchInput = document.getElementById("searchInput");
+      const statusDock = document.getElementById("statusDock");
+      const filterToggle = document.getElementById("filterToggle");
+      const typePaneToggle = document.getElementById("typePaneToggle");
+      const matrixBoard = document.getElementById("matrixBoard");
+      const boardScroll = document.querySelector(".board-scroll");
+      const boardXScroll = document.getElementById("boardXScroll");
+      const boardXScrollInner = document.getElementById("boardXScrollInner");
+      const generalFilterPanel = document.getElementById("generalFilterPanel");
+      const filterBackdrop = document.getElementById("filterBackdrop");
+
+      function renderFacetGroup(facet, options = {}) {
+        const counts = mock.facetCounts(mock.workOrders, state, facet);
+        const compact = options.compact ? " compact-filter-group" : "";
+        const shownCounts = counts.slice(0, options.limit ?? 8);
+
+        return `
+          <section class="filter-group${compact}">
+            <div class="filter-group-header">
+              <h3>${mock.escapeHtml(facet.label)}</h3>
+              <div class="filter-actions">
+                <button data-filter-action="clear" data-state-key="${mock.escapeHtml(facet.stateKey)}">Clear</button>
+                <button data-filter-action="selectAll" data-state-key="${mock.escapeHtml(facet.stateKey)}">All</button>
+              </div>
+            </div>
+            <div class="filter-options">
+              ${shownCounts
+                .map(
+                  (option) => `
+                    <button class="filter-option${option.active ? " active" : ""}" data-state-key="${mock.escapeHtml(facet.stateKey)}" data-filter-value="${mock.escapeHtml(option.value)}">
+                      <span class="filter-check">${option.active ? "✓" : ""}</span>
+                      <span class="filter-label">${mock.escapeHtml(option.label)}</span>
+                      <span class="filter-count">${option.count}</span>
+                    </button>
+                  `
+                )
+                .join("")}
+              ${counts.length > shownCounts.length ? `<div class="filter-overflow-note">${counts.length - shownCounts.length} more values</div>` : ""}
+              ${counts.length === 0 ? '<div class="empty-state">No values</div>' : ""}
+            </div>
+          </section>
+        `;
+      }
+
+      function renderGeneralFilters() {
+        generalFilterPanel.innerHTML = `
+          <aside class="filter-panel-inner">
+            <div class="filter-topline">
+              <div>
+                <p class="eyebrow">General filters</p>
+                <h2>Board scope</h2>
+              </div>
+              <button class="drawer-close" type="button" data-close-filters aria-label="Close filters">Close</button>
+            </div>
+            <div class="active-filter-summary">
+              ${mock.activeFilterSummary(state).map((chip) => `<span class="chip">${mock.escapeHtml(chip)}</span>`).join("")}
+            </div>
+            ${mock.commonFacets.map((facet) => renderFacetGroup(facet)).join("")}
+          </aside>
+        `;
+      }
+
+      function renderLaneFilters(type) {
+        const modeBlock =
+          type === "spark"
+            ? `
+              <section class="filter-group compact-filter-group">
+                <div class="filter-group-header"><h3>Mode</h3></div>
+                <div class="filter-mode-row">
+                  ${mock.modeOptions
+                    .map(
+                      (mode) => `
+                        <button class="filter-mode${state.mode === mode.value ? " active" : ""}" data-filter-mode="${mock.escapeHtml(mode.value)}">
+                          ${mock.escapeHtml(mode.label)}
+                        </button>
+                      `
+                    )
+                    .join("")}
+                </div>
+              </section>
+            `
+            : "";
+
+        return `
+          <div class="lane-filter-stack">
+            ${modeBlock}
+            ${mock.typeFacets[type].map((facet) => renderFacetGroup(facet, { compact: true, limit: 6 })).join("")}
+          </div>
+        `;
+      }
+      function renderMatrix(filtered) {
+        const filteredStatuses = state.statuses.length
+          ? mock.statuses.filter((status) => state.statuses.includes(status.value))
+          : mock.statuses;
+        const boardStatuses = filteredStatuses.filter((status) => !collapsedStatuses[status.value]);
+        const typeColumnWidth = 300;
+        const expandedStatusColumnWidth = 250;
+        const statusTracks = boardStatuses.map(() => `minmax(${expandedStatusColumnWidth}px, 1fr)`).join(" ");
+        const gridColumns = [typeColumnCollapsed ? "" : `${typeColumnWidth}px`, statusTracks].filter(Boolean).join(" ");
+        const gridStyle = `grid-template-columns: ${gridColumns || `minmax(${expandedStatusColumnWidth}px, 1fr)`};`;
+        const estimatedWidth = (typeColumnCollapsed ? 0 : typeColumnWidth) + boardStatuses.length * (expandedStatusColumnWidth + 16);
+        matrixBoard.style.minWidth = `${Math.max(estimatedWidth, expandedStatusColumnWidth)}px`;
+
+        const typeHeader = typeColumnCollapsed
+          ? ""
+          : `
+            <div class="matrix-head-cell type-head">
+              <span class="type-head-label" data-active-type-label>Type & filters</span>
+              <button class="type-column-toggle type-pane-chevron" type="button" data-toggle-type-column aria-expanded="true" aria-label="Hide type filters">&lsaquo;</button>
+            </div>
+          `;
+
+        const header = `
+          <div class="matrix-head${typeColumnCollapsed ? " type-pane-hidden" : ""}" style="${gridStyle}">
+            ${typeHeader}
+            ${boardStatuses
+              .map(
+                (status) => `
+                  <div class="matrix-head-cell status-head status-${mock.escapeHtml(status.value)}" data-status-header="${mock.escapeHtml(status.value)}">
+                    <div class="status-title-inline">
+                      <span class="status-dot ${mock.escapeHtml(status.value)}"></span>
+                      <span class="status-label">${mock.escapeHtml(status.label)}</span>
+                    </div>
+                    <div class="status-head-actions">
+                      <span class="status-header-count" data-header-status-count="${mock.escapeHtml(status.value)}">0</span>
+                      <button class="status-column-toggle" type="button" data-toggle-status-column="${mock.escapeHtml(status.value)}" aria-expanded="true">Hide</button>
+                    </div>
+                  </div>
+                `
+              )
+              .join("")}
+          </div>
+        `;
+
+        const rows = mock.typeOrder
+          .map((type) => {
+            const laneOrders = filtered.filter((order) => order.type === type);
+            const swimlaneCollapsed = collapsedSwimlanes[type];
+            const cells = boardStatuses
+              .map((status, statusIndex) => {
+                const cellOrders = laneOrders.filter((order) => order.status === status.value);
+                const cards = cellOrders.length
+                  ? cellOrders.map((order) => mock.cardHtml(order, { compact: false })).join("")
+                  : '<div class="empty-state">No work orders</div>';
+                const hiddenLaneToggle = typeColumnCollapsed && statusIndex === 0
+                  ? `<button class="swimlane-inline-toggle" type="button" data-toggle-swimlane="${mock.escapeHtml(type)}" aria-expanded="${String(!swimlaneCollapsed)}">${mock.escapeHtml(mock.typeLabel(type))} ${swimlaneCollapsed ? "Show" : "Hide"}</button>`
+                  : "";
+
+                return swimlaneCollapsed
+                  ? `
+                    <div class="matrix-cell swimlane-collapsed-cell" data-status-cell="${mock.escapeHtml(status.value)}">
+                      ${hiddenLaneToggle}
+                      <div class="swimlane-status-summary">
+                        <span class="status-dot ${mock.escapeHtml(status.value)}"></span>
+                        <span class="swimlane-status-label">${mock.escapeHtml(status.label)}</span>
+                        <strong>${cellOrders.length}</strong>
+                      </div>
+                    </div>
+                  `
+                  : `
+                    <div class="matrix-cell${hiddenLaneToggle ? " matrix-cell-with-inline-toggle" : ""}" data-status-cell="${mock.escapeHtml(status.value)}">
+                      ${hiddenLaneToggle}
+                      <div class="matrix-cell-inner">${cards}</div>
+                    </div>
+                  `;
+              })
+              .join("");
+            const typeLane = typeColumnCollapsed
+              ? ""
+              : swimlaneCollapsed
+                ? `
+                  <aside class="matrix-lane matrix-lane-with-filters swimlane-collapsed-lane">
+                    <div class="swimlane-lane-top">
+                      <span class="type-badge ${mock.escapeHtml(type)}">${mock.escapeHtml(mock.typeLabel(type))}</span>
+                      <button class="swimlane-toggle" type="button" data-toggle-swimlane="${mock.escapeHtml(type)}" aria-expanded="false">Show</button>
+                    </div>
+                    <h2>${mock.escapeHtml(mock.types[type].subjectLabel)} work</h2>
+                    <span class="swimlane-total-count">${laneOrders.length} work orders</span>
+                  </aside>
+                `
+                : `
+                  <aside class="matrix-lane matrix-lane-with-filters">
+                    <div class="swimlane-lane-top">
+                      <span class="type-badge ${mock.escapeHtml(type)}">${mock.escapeHtml(mock.typeLabel(type))}</span>
+                      <button class="swimlane-toggle" type="button" data-toggle-swimlane="${mock.escapeHtml(type)}" aria-expanded="true">Hide lane</button>
+                    </div>
+                    <h2>${mock.escapeHtml(mock.types[type].subjectLabel)} work</h2>
+                    ${renderLaneFilters(type)}
+                  </aside>
+                `;
+
+            return `
+              <div class="matrix-row${typeColumnCollapsed ? " type-pane-hidden" : ""}${swimlaneCollapsed ? " swimlane-row-collapsed" : ""}" data-type-row="${mock.escapeHtml(type)}" style="${gridStyle}">
+                ${typeLane}
+                ${cells}
+              </div>
+            `;
+          })
+          .join("");
+
+        typePaneToggle.hidden = !typeColumnCollapsed;
+        typePaneToggle.setAttribute("aria-expanded", String(!typeColumnCollapsed));
+        matrixBoard.innerHTML = header + rows;
+        updateStickyHeaderContext();
+        updateHorizontalScrollbar();
+      }
+      function setFiltersOpen(open) {
+        filtersOpen = open;
+        filterBackdrop.hidden = !filtersOpen;
+        generalFilterPanel.classList.toggle("is-open", filtersOpen);
+        generalFilterPanel.setAttribute("aria-hidden", String(!filtersOpen));
+        filterToggle.classList.toggle("active", filtersOpen);
+        filterToggle.setAttribute("aria-expanded", String(filtersOpen));
+      }
+
+
+
+      function visibleStatuses() {
+        return state.statuses.length
+          ? mock.statuses.filter((status) => state.statuses.includes(status.value))
+          : mock.statuses;
+      }
+
+      function statusDefinition(statusValue) {
+        return mock.statuses.find((status) => status.value === statusValue);
+      }
+
+      function activeStatusCount(statusValue) {
+        const activeType = activeTypeFromScroll();
+        return currentFiltered.filter((order) => order.type === activeType && order.status === statusValue).length;
+      }
+
+      function renderStatusDock() {
+        const dockedStatuses = visibleStatuses().filter((status) => collapsedStatuses[status.value]);
+        statusDock.innerHTML = dockedStatuses
+          .map(
+            (status) => `
+              <button class="status-dock-item status-${mock.escapeHtml(status.value)}" type="button" data-restore-status="${mock.escapeHtml(status.value)}" aria-label="Restore ${mock.escapeHtml(status.label)} column">
+                <span class="status-dot ${mock.escapeHtml(status.value)}"></span>
+                <span class="status-dock-label">${mock.escapeHtml(status.label)}</span>
+                <span class="status-dock-count" data-dock-status-count="${mock.escapeHtml(status.value)}">0</span>
+              </button>
+            `
+          )
+          .join("");
+        updateStickyHeaderContext();
+      }
+
+      function ghostLabel(statusValue) {
+        const status = statusDefinition(statusValue);
+        return `
+          <span class="status-dot ${mock.escapeHtml(statusValue)}"></span>
+          <span>${mock.escapeHtml(status?.label ?? statusValue)}</span>
+          <strong>${activeStatusCount(statusValue)}</strong>
+        `;
+      }
+
+      function runGenieAnimation(statusValue, fromRect, toRect, direction = "minimize") {
+        if (!fromRect || !toRect) return;
+        const ghost = document.createElement("div");
+        ghost.className = `minimize-ghost ${direction === "restore" ? "restore" : ""}`;
+        ghost.innerHTML = ghostLabel(statusValue);
+        ghost.style.left = `${fromRect.left}px`;
+        ghost.style.top = `${fromRect.top}px`;
+        ghost.style.width = `${fromRect.width}px`;
+        ghost.style.height = `${fromRect.height}px`;
+        document.body.appendChild(ghost);
+
+        const dx = toRect.left - fromRect.left;
+        const dy = toRect.top - fromRect.top;
+        const sx = Math.max(toRect.width / fromRect.width, 0.08);
+        const sy = Math.max(toRect.height / fromRect.height, 0.08);
+        const bend = Math.max(Math.min(dx / 18, 16), -16);
+
+        ghost.animate(
+          [
+            {
+              transform: "translate3d(0, 0, 0) scale(1, 1) skewX(0deg)",
+              clipPath: "polygon(0 0, 100% 0, 100% 100%, 0 100%)",
+              borderRadius: "8px",
+              opacity: 0.96,
+              offset: 0,
+            },
+            {
+              transform: `translate3d(${dx * 0.46}px, ${dy * 0.58}px, 0) scale(${Math.max((1 + sx) / 2, 0.36)}, 0.22) skewX(${bend}deg)`,
+              clipPath: "polygon(14% 0, 86% 0, 100% 100%, 0 100%)",
+              borderRadius: "18px",
+              opacity: 0.78,
+              offset: 0.55,
+            },
+            {
+              transform: `translate3d(${dx}px, ${dy}px, 0) scale(${sx}, ${sy}) skewX(0deg)`,
+              clipPath: "polygon(0 0, 100% 0, 100% 100%, 0 100%)",
+              borderRadius: "999px",
+              opacity: 0.16,
+              offset: 1,
+            },
+          ],
+          {
+            duration: 520,
+            easing: "cubic-bezier(0.18, 0.88, 0.22, 1)",
+            fill: "forwards",
+          }
+        ).addEventListener("finish", () => ghost.remove());
+      }
+
+      function collapseStatusColumn(statusValue, sourceElement) {
+        const fromRect = sourceElement?.getBoundingClientRect();
+        collapsedStatuses[statusValue] = true;
+        render();
+        const target = statusDock.querySelector(`[data-restore-status="${statusValue}"]`);
+        runGenieAnimation(statusValue, fromRect, target?.getBoundingClientRect(), "minimize");
+      }
+
+      function restoreStatusColumn(statusValue, sourceElement) {
+        const fromRect = sourceElement?.getBoundingClientRect();
+        collapsedStatuses[statusValue] = false;
+        render();
+        const target = matrixBoard.querySelector(`[data-status-header="${statusValue}"]`);
+        runGenieAnimation(statusValue, fromRect, target?.getBoundingClientRect(), "restore");
+      }
+      let syncingHorizontalScroll = false;
+
+      function syncFooterScrollFromBoard() {
+        if (syncingHorizontalScroll) return;
+        syncingHorizontalScroll = true;
+        boardXScroll.scrollLeft = boardScroll.scrollLeft;
+        syncingHorizontalScroll = false;
+      }
+
+      function syncBoardScrollFromFooter() {
+        if (syncingHorizontalScroll) return;
+        syncingHorizontalScroll = true;
+        boardScroll.scrollLeft = boardXScroll.scrollLeft;
+        syncingHorizontalScroll = false;
+      }
+
+      function updateHorizontalScrollbar() {
+        boardXScrollInner.style.width = `${matrixBoard.scrollWidth}px`;
+        syncFooterScrollFromBoard();
+      }
+      function activeTypeFromScroll() {
+        const rows = Array.from(matrixBoard.querySelectorAll("[data-type-row]"));
+        if (!rows.length) return mock.typeOrder[0];
+
+        const headerHeight = matrixBoard.querySelector(".matrix-head")?.offsetHeight ?? 0;
+        const marker = boardScroll.scrollTop + headerHeight + 24;
+        let activeType = rows[0].dataset.typeRow;
+
+        rows.forEach((row) => {
+          if (row.offsetTop <= marker) activeType = row.dataset.typeRow;
+        });
+
+        return activeType;
+      }
+
+      function updateStickyHeaderContext() {
+        const activeType = activeTypeFromScroll();
+        const activeOrders = currentFiltered.filter((order) => order.type === activeType);
+        const activeTypeLabel = mock.typeLabel(activeType);
+
+        matrixBoard.querySelectorAll("[data-active-type-label]").forEach((label) => {
+          label.textContent = typeColumnCollapsed ? activeTypeLabel : `${activeTypeLabel} filters`;
+        });
+
+        mock.statuses.forEach((status) => {
+          const count = activeOrders.filter((order) => order.status === status.value).length;
+          const countNode = matrixBoard.querySelector(`[data-header-status-count="${status.value}"]`);
+          if (countNode) countNode.textContent = count;
+          const dockCountNode = statusDock.querySelector(`[data-dock-status-count="${status.value}"]`);
+          if (dockCountNode) dockCountNode.textContent = count;
+        });
+      }
+      function render() {
+        const filtered = mock.filterOrders(mock.workOrders, state);
+        currentFiltered = filtered;
+        renderGeneralFilters();
+        renderStatusDock();
+        renderMatrix(filtered);
+        setFiltersOpen(filtersOpen);
+      }
+
+      searchInput.addEventListener("input", (event) => {
+        state.search = event.target.value;
+        render();
+      });
+
+      filterToggle.addEventListener("click", () => {
+        setFiltersOpen(!filtersOpen);
+      });
+
+      typePaneToggle.addEventListener("click", () => {
+        typeColumnCollapsed = false;
+        render();
+      });
+
+      statusDock.addEventListener("click", (event) => {
+        const dockItem = event.target.closest("[data-restore-status]");
+        if (!dockItem) return;
+        restoreStatusColumn(dockItem.dataset.restoreStatus, dockItem);
+      });
+
+      filterBackdrop.addEventListener("click", () => {
+        setFiltersOpen(false);
+      });
+
+      generalFilterPanel.addEventListener("click", (event) => {
+        if (event.target.closest("[data-close-filters]")) {
+          setFiltersOpen(false);
+          return;
+        }
+        mock.handleFilterPanelClick(event, state, { afterChange: render });
+      });
+
+      boardScroll.addEventListener("scroll", () => {
+        updateStickyHeaderContext();
+        syncFooterScrollFromBoard();
+      }, { passive: true });
+      boardXScroll.addEventListener("scroll", syncBoardScrollFromFooter, { passive: true });
+      window.addEventListener("resize", updateHorizontalScrollbar);
+
+      matrixBoard.addEventListener("click", (event) => {
+        if (event.target.closest("[data-toggle-type-column]")) {
+          typeColumnCollapsed = !typeColumnCollapsed;
+          render();
+          return;
+        }
+
+        const swimlaneToggle = event.target.closest("[data-toggle-swimlane]");
+        if (swimlaneToggle) {
+          const type = swimlaneToggle.dataset.toggleSwimlane;
+          collapsedSwimlanes[type] = !collapsedSwimlanes[type];
+          render();
+          return;
+        }
+
+        const statusToggle = event.target.closest("[data-toggle-status-column]");
+        if (statusToggle) {
+          const status = statusToggle.dataset.toggleStatusColumn;
+          collapseStatusColumn(status, statusToggle.closest("[data-status-header]") ?? statusToggle);
+          return;
+        }
+        mock.handleFilterPanelClick(event, state, { afterChange: render });
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && filtersOpen) setFiltersOpen(false);
+      });
+
+      render();
+    </script>
+  </body>
+</html>
+
+
+
+
+
+
+
+
